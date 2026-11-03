@@ -652,7 +652,7 @@ def login_account(request: LoginRequest, response: Response):
         token,
         httponly=True,
         secure=os.getenv("ARGUS_COOKIE_SECURE", "0") == "1",
-        samesite="lax",
+        samesite=os.getenv("ARGUS_COOKIE_SAMESITE", "lax"),
         max_age=SESSION_HOURS * 3600,
         path="/",
     )
