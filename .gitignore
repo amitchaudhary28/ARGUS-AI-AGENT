@@ -1,0 +1,100 @@
+
+# ==========================================
+# ARGUS - Git Ignore Configuration
+# ==========================================
+
+# ---------- Node.js / Frontend ----------
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---------- Python / Backend ----------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python build artifacts
+build/
+develop-eggs/
+dist-python/
+eggs/
+wheels/
+*.egg-info/
+.installed.cfg
+
+# ---------- Environment Variables / Secrets ----------
+.env
+.env.*
+!.env.example
+
+# ---------- Databases / Persistent Storage ----------
+*.sqlite
+*.sqlite3
+*.db
+backend/.chroma/
+.chroma/
+
+# ---------- Logs ----------
+logs/
+*.log
+*.tmp
+
+# ---------- Testing / Coverage ----------
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# ---------- Editor / IDE ----------
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+*.code-workspace
+
+# ---------- Operating System ----------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Desktop.ini
+
+# ---------- Temporary Files ----------
+*.bak
+*.swp
+*.swo
+*.orig
+*.temp
+
+# ---------- ARGUS Local Data ----------
+argus_accounts.sqlite3
+
+# ARGUS generated scan history
+backend/app/data/scan_history.json
