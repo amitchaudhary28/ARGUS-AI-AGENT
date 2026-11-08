@@ -7,7 +7,6 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-
 # Load environment variables from backend/.env
 BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(BACKEND_DIR / ".env", override=False)
@@ -94,7 +93,7 @@ def main():
                 response.usage_metadata.total_token_count
             )
 
-    except Exception as exc:
+    except Exception as exc: # noqa: BLE001
         elapsed = time.perf_counter() - start_time
 
         print("\nSTATUS: FAILED")

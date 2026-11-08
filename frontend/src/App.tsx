@@ -338,15 +338,97 @@ function Workspace({ user, onSignOut, onSignIn, isGuest = false }: { user: Argus
   const attachmentInputRef = useRef<HTMLInputElement>(null);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [repoImportUrl, setRepoImportUrl] = useState("");
+  const [repoImportToken, setRepoImportToken] = useState("");
+  const [repoImportBusy, setRepoImportBusy] = useState(false);
+  const [repoImportMessage, setRepoImportMessage] = useState("");
+  const [repoImportError, setRepoImportError] = useState("");
+  const zipInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [repoPath, setRepoPath] = useState(() => {
     const savedPath = localStorage.getItem(`argus.repoPath.${user.id}`) || "";
-    return /^C:\\\\Users\\\\amitc\\\\ARGUS$/i.test(savedPath) ? "" : savedPath;
+    return /^C:\\Users\\amitc\\ARGUS$/i.test(savedPath) ? "" : savedPath;
   });
+  const [repoName, setRepoName] = useState(() => {
+    const savedName = localStorage.getItem(`argus.repoName.${user.id}`) || "";
+    // Older upload responses exposed the temporary workspace ID as the name.
+    return /^[a-f0-9]{24,}$/i.test(savedName) ? "Imported project" : savedName;
+  });
+  const [repoSource, setRepoSource] = useState(() => localStorage.getItem(`argus.repoSource.${user.id}`) || "");
+  const [repoFiles, setRepoFiles] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(`argus.repoFiles.${user.id}`) || "[]");
+      return Array.isArray(saved) ? saved.filter((item): item is string => typeof item === "string") : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const editableRepositoryFiles = repoFiles.filter((file) =>
+    /\.(py|js|jsx|ts|tsx)$/i.test(file) &&
+    !/(^|\/)\.env(?:\.|$)/i.test(file)
+  );
+
+  useEffect(() => {
+    folderInputRef.current?.setAttribute("webkitdirectory", "");
+    folderInputRef.current?.setAttribute("directory", "");
+  }, []);
 
   useEffect(() => {
     if (repoPath.trim()) localStorage.setItem(`argus.repoPath.${user.id}`, repoPath.trim());
     else localStorage.removeItem(`argus.repoPath.${user.id}`);
   }, [repoPath, user.id]);
+
+  useEffect(() => {
+    const key = `argus.repoName.${user.id}`;
+    if (repoName) localStorage.setItem(key, repoName);
+    else localStorage.removeItem(key);
+  }, [repoName, user.id]);
+
+  useEffect(() => {
+    const key = `argus.repoSource.${user.id}`;
+    if (repoSource) localStorage.setItem(key, repoSource);
+    else localStorage.removeItem(key);
+  }, [repoSource, user.id]);
+
+  useEffect(() => {
+    const key = `argus.repoFiles.${user.id}`;
+    if (repoFiles.length) localStorage.setItem(key, JSON.stringify(repoFiles));
+    else localStorage.removeItem(key);
+  }, [repoFiles, user.id]);
+
+  useEffect(() => {
+    if (!repoPath.trim()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/repository/files?repo_path=${encodeURIComponent(repoPath)}`,
+          { credentials: "include" }
+        );
+        if (!response.ok) throw new Error("Imported workspace is no longer available.");
+        const listing = await response.json() as { files?: string[] };
+        if (!cancelled) {
+          const availableFiles = Array.isArray(listing.files) ? listing.files : [];
+          setRepoFiles(availableFiles);
+          setEditFilePath((current) =>
+            current && availableFiles.includes(current)
+              ? current
+              : availableFiles.find((file) => /\.(py|js|jsx|ts|tsx)$/i.test(file)) || ""
+          );
+        }
+      } catch {
+        if (!cancelled) {
+          setRepoPath("");
+          setRepoName("");
+          setRepoSource("");
+          setRepoFiles([]);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [repoPath]);
+
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -358,11 +440,6 @@ function Workspace({ user, onSignOut, onSignIn, isGuest = false }: { user: Argus
     textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
   }, [input]);
 
-  const [reviewOpen, setReviewOpen] = useState(false);
-  const [reviewFilePath, setReviewFilePath] = useState("backend/app/rag.py");
-  const [reviewLoading, setReviewLoading] = useState(false);
-  const [reviewResult, setReviewResult] = useState("");
-  const [reviewError, setReviewError] = useState("");
 
   const [scanOpen, setScanOpen] = useState(false);
   const [scanLoading, setScanLoading] = useState(false);
@@ -476,13 +553,10 @@ function Workspace({ user, onSignOut, onSignIn, isGuest = false }: { user: Argus
     if (loading) return;
 
     setScanOpen(false);
-    setReviewOpen(false);
     setEngineeringOpen(false);
     setCodeEditorOpen(false);
     setScanResult(null);
     setScanError("");
-    setReviewResult("");
-    setReviewError("");
     setFixSuggestion(null);
     setFixError("");
     setFixMessage("");
@@ -499,13 +573,10 @@ function Workspace({ user, onSignOut, onSignIn, isGuest = false }: { user: Argus
     if (loading) return;
 
     setScanOpen(false);
-    setReviewOpen(false);
     setEngineeringOpen(false);
     setCodeEditorOpen(false);
     setScanResult(null);
     setScanError("");
-    setReviewResult("");
-    setReviewError("");
     setMode(nextMode);
     setInput("");
     setError("");
@@ -527,13 +598,10 @@ function Workspace({ user, onSignOut, onSignIn, isGuest = false }: { user: Argus
     if (loading) return;
 
     setScanOpen(false);
-    setReviewOpen(false);
     setEngineeringOpen(false);
     setCodeEditorOpen(false);
     setScanResult(null);
     setScanError("");
-    setReviewResult("");
-    setReviewError("");
     setFixSuggestion(null);
     setActiveId(session.id);
     setMode(session.mode);
@@ -816,62 +884,77 @@ function toggleVoiceInput() {
     }
   }
 
-  async function runCodeReview(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const filePath = reviewFilePath.trim();
-
-    if (!repoPath.trim()) {
-      setReviewError("Please enter your repository folder path.");
-      return;
+  async function importRepository(source: "github" | "zip" | "folder", selectedFiles?: FileList | null) {
+    // Capture the source name before awaiting the upload; the input is reset immediately after this call.
+    const selectedFileNames = Array.from(selectedFiles ?? []).map((file) => ({
+      name: file.name,
+      relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+    }));
+    let sourceDisplayName = "";
+    if (source === "github") {
+      sourceDisplayName = repoImportUrl.trim().replace(/\.git$/i, "").split("/").filter(Boolean).pop() || "";
+    } else if (source === "zip" && selectedFileNames[0]) {
+      sourceDisplayName = selectedFileNames[0].name.replace(/\.zip$/i, "");
+    } else if (source === "folder" && selectedFileNames[0]) {
+      sourceDisplayName = selectedFileNames[0].relativePath.split(/[\\/]/).filter(Boolean)[0] || "";
     }
 
-    if (!filePath) {
-      setReviewError("Please enter a repository-relative file path.");
-      return;
-    }
-
-    setReviewLoading(true);
-    setReviewError("");
-    setReviewResult("");
-
+    setRepoImportBusy(true);
+    setRepoImportError("");
+    setRepoImportMessage("");
     try {
-      const response = await fetch(`${API_URL}/api/repository/review`, {
-        credentials: "include",
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          repo_path: repoPath.trim(),
-          file_path: filePath,
-        }),
-      });
-
-      const data: unknown = await response.json();
-      const result = data as Record<string, unknown>;
-
-      if (!response.ok) {
-        throw new Error(
-          typeof result.detail === "string"
-            ? result.detail
-            : JSON.stringify(result.detail ?? `HTTP ${response.status}`)
-        );
+      let response: Response;
+      if (source === "github") {
+        if (!repoImportUrl.trim()) throw new Error("Enter a GitHub repository URL.");
+        const body = new FormData();
+        body.append("repository_url", repoImportUrl.trim());
+        if (repoImportToken.trim()) body.append("github_token", repoImportToken.trim());
+        response = await fetch(`${API_URL}/api/repository/import/github`, {
+          method: "POST", credentials: "include", body,
+        });
+      } else {
+        const chosen = Array.from(selectedFiles ?? []);
+        if (!chosen.length) throw new Error("Select a ZIP file or a project folder.");
+        const body = new FormData();
+        for (const file of chosen) {
+          body.append("files", file, file.name);
+          body.append("relative_paths", source === "folder" ? (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name : file.name);
+        }
+        response = await fetch(`${API_URL}/api/repository/import/upload`, {
+          method: "POST", credentials: "include", body,
+        });
       }
+      const data = await response.json() as { repo_path?: string; repository?: string; detail?: string };
+      if (!response.ok || !data.repo_path) throw new Error(data.detail || `Repository import failed (${response.status}).`);
+      setRepoPath(data.repo_path);
 
-      if (
-        typeof result.review !== "string" ||
-        !result.review.trim()
-      ) {
-        throw new Error("The backend returned an empty code review.");
-      }
-
-      const reviewContent = `## Code Review: ${String(result.file ?? filePath)}\n\n${result.review}`;
-      setReviewResult(reviewContent);
-    } catch (err) {
-      setReviewError(
-        err instanceof Error ? err.message : "Unexpected code review error."
+      // Never display the backend's temporary workspace ID as the repository name.
+      const backendName = typeof data.repository === "string" ? data.repository.trim() : "";
+      const safeBackendName = backendName && !/^[a-f0-9]{24,}$/i.test(backendName)
+        ? backendName
+        : "Imported project";
+      setRepoName(sourceDisplayName || safeBackendName);
+      setRepoSource(source === "github" ? "GitHub" : source === "zip" ? "ZIP upload" : "Folder upload");
+      const listingResponse = await fetch(
+        `${API_URL}/api/repository/files?repo_path=${encodeURIComponent(data.repo_path)}`,
+        { credentials: "include" }
       );
+      if (!listingResponse.ok) {
+        const listingError = await listingResponse.json().catch(() => ({}));
+        throw new Error(listingError.detail || "Repository imported, but its file list could not be loaded.");
+      }
+      const listing = await listingResponse.json() as { files?: string[]; file_count?: number };
+      const importedFiles = Array.isArray(listing.files) ? listing.files : [];
+      setRepoFiles(importedFiles);
+      const firstEditableFile = importedFiles.find((file) => /\.(py|js|jsx|ts|tsx)$/i.test(file));
+      setEditFilePath(firstEditableFile || "");
+      setRepoImportMessage(`Repository ready · ${listing.file_count ?? importedFiles.length} files`);
+      setRepoImportUrl("");
+      setRepoImportToken("");
+    } catch (err) {
+      setRepoImportError(err instanceof Error ? err.message : "Unable to import repository.");
     } finally {
-      setReviewLoading(false);
+      setRepoImportBusy(false);
     }
   }
 
@@ -971,7 +1054,7 @@ function toggleVoiceInput() {
       if (sessionId) {
         updateSession(sessionId, (current) => ({
           ...current,
-          title: current.title === "New conversation" ? `Repository Scan: ${new Date().toLocaleDateString()}` : current.title,
+          title: current.title === "New conversation" ? "Repository Scan" : current.title,
           messages: [
             ...current.messages,
             { role: "user", content: `Analyze repository for bugs and code-quality issues: ${repoPath.trim()}` },
@@ -995,8 +1078,8 @@ function toggleVoiceInput() {
   async function requestManualCodeEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!repoPath.trim()) { setFixError("Please enter your repository folder path."); return; }
-    if (!editFilePath.trim() || !editInstruction.trim()) { setFixError("Enter a supported source file path (.py, .js, .jsx, .ts or .tsx) and describe the change you want."); return; }
-    if (!/\.(py|js|jsx|ts|tsx)$/i.test(editFilePath.trim())) { setFixError("AI editing supports .py, .js, .jsx, .ts and .tsx files."); return; }
+    if (!editFilePath.trim() || !editInstruction.trim()) { setFixError("Choose a source file from the imported repository and describe the change you want."); return; }
+    if (!/\.(py|js|jsx|ts|tsx)$/i.test(editFilePath.trim())) { setFixError("Choose a supported source file (.py, .js, .jsx, .ts or .tsx) from the imported repository."); return; }
     setFixLoading(true); setFixError(""); setFixMessage(""); setFixSuggestion(null);
     try {
       const response = await fetch(`${API_URL}/api/repository/fix/suggest`, {
@@ -1123,8 +1206,16 @@ function toggleVoiceInput() {
       return;
     }
 
-    if (!/\\.(py|js|jsx|ts|tsx)$/i.test(filePath)) {
-      setFixError("AI editing supports .py, .js, .jsx, .ts and .tsx files.");
+    const selectedFilePath = filePath.trim();
+    const pathSegments = selectedFilePath.split(/[\\/]+/);
+    if (
+      !/\.(py|js|jsx|ts|tsx)$/i.test(selectedFilePath) ||
+      selectedFilePath.includes("://") ||
+      selectedFilePath.startsWith("/") ||
+      /^[A-Za-z]:/.test(selectedFilePath) ||
+      pathSegments.some((segment) => !segment || segment === "." || segment === "..")
+    ) {
+      setFixError("The selected finding does not point to a supported, repository-relative source file.");
       return;
     }
 
@@ -1140,7 +1231,7 @@ function toggleVoiceInput() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           repo_path: repoPath.trim(),
-          file_path: filePath,
+          file_path: selectedFilePath,
           finding_description: finding.description,
           line: finding.line,
         }),
@@ -1236,7 +1327,7 @@ function toggleVoiceInput() {
 
 
   return (
-    <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
+    <div className={`app ${sidebarCollapsed ? "sidebar-collapsed" : ""} ${mode === "chat" ? "ai-assistant-mode" : ""}`}>
       <aside className="sidebar">
         <button
           type="button"
@@ -1314,7 +1405,6 @@ function toggleVoiceInput() {
               <span className="workspace-mode-icon" aria-hidden="true">{mode === "agent" ? "⌘" : "✳"}</span>
               <span className="workspace-mode-copy">
                 <strong>{mode === "agent" ? "Repository Agent" : "AI Assistant"}</strong>
-                <small>{mode === "agent" ? "Understand and analyze your codebase" : "Ask questions and explore ideas"}</small>
               </span>
               <span className="workspace-mode-chevron" aria-hidden="true">⌄</span>
             </button>
@@ -1322,12 +1412,12 @@ function toggleVoiceInput() {
               <div className="workspace-mode-menu" role="menu">
                 <button type="button" role="menuitem" className={`workspace-mode-option ${mode === "agent" ? "selected" : ""}`} onClick={() => { switchMode("agent"); setWorkspaceMenuOpen(false); }}>
                   <span className="workspace-mode-icon" aria-hidden="true">⌘</span>
-                  <span><strong>Repository Agent</strong><small>Analyze files, architecture and bugs</small></span>
+                  <span><strong>Repository Agent</strong></span>
                   {mode === "agent" && <span className="mode-check">✓</span>}
                 </button>
                 <button type="button" role="menuitem" className={`workspace-mode-option ${mode === "chat" ? "selected" : ""}`} onClick={() => { switchMode("chat"); setWorkspaceMenuOpen(false); }}>
                   <span className="workspace-mode-icon" aria-hidden="true">✳</span>
-                  <span><strong>AI Assistant</strong><small>Discuss concepts and technical topics</small></span>
+                  <span><strong>AI Assistant</strong></span>
                   {mode === "chat" && <span className="mode-check">✓</span>}
                 </button>
               </div>
@@ -1336,19 +1426,65 @@ function toggleVoiceInput() {
 
           {mode === "agent" && (
             <>
-              <label htmlFor="repo-path" className="field-label">
-                REPOSITORY PATH
-              </label>
+              <label htmlFor="repo-url" className="field-label">GITHUB REPOSITORY URL</label>
               <input
-                id="repo-path"
+                id="repo-url"
                 className="field"
-                value={repoPath}
-                onChange={(event) => setRepoPath(event.target.value)}
-                placeholder="Project folder path"
+                value={repoImportUrl}
+                onChange={(event) => setRepoImportUrl(event.target.value)}
+                placeholder="https://github.com/owner/repository"
+                disabled={repoImportBusy}
               />
-              <p className="sidebar-help">
-                Local folder accessible to the FastAPI backend.
-              </p>
+              <input
+                className="field"
+                type="password"
+                value={repoImportToken}
+                onChange={(event) => setRepoImportToken(event.target.value)}
+                placeholder="Private repo token (optional)"
+                autoComplete="off"
+                disabled={repoImportBusy}
+              />
+              <button type="button" className="repo-import-button" disabled={repoImportBusy || !repoImportUrl.trim()} onClick={() => void importRepository("github")}>
+                {repoImportBusy ? "Importing…" : "Import GitHub Repository"}
+              </button>
+              <div className="repo-upload-actions">
+                <button type="button" className="repo-import-button secondary" disabled={repoImportBusy} onClick={() => zipInputRef.current?.click()}>Upload ZIP</button>
+                <button type="button" className="repo-import-button secondary" disabled={repoImportBusy} onClick={() => folderInputRef.current?.click()}>Upload Folder</button>
+              </div>
+              <input ref={zipInputRef} type="file" accept=".zip,application/zip" hidden onChange={(event) => { const selected = event.target.files; if (selected?.length) void importRepository("zip", selected); event.target.value = ""; }} />
+              <input ref={folderInputRef} type="file" multiple hidden onChange={(event) => { const selected = event.target.files; if (selected?.length) void importRepository("folder", selected); event.target.value = ""; }} />
+              {repoImportBusy && <p className="sidebar-help">Importing repository. Please keep this page open.</p>}
+              {repoImportMessage && <p className="repo-import-success" role="status">{repoImportMessage}</p>}
+              {repoImportError && <ErrorAlert title="Repository import failed" message={repoImportError} onClose={() => setRepoImportError("")} />}
+              <section className="active-repository" aria-label="Active repository">
+                <div className="active-repository-heading">
+                  <span className="field-label">ACTIVE REPOSITORY</span>
+                  {repoPath && <span className="repository-status"><i /> Ready</span>}
+                </div>
+                {repoPath ? (
+                  <>
+                    <div className="active-repository-name" title={repoName}>{repoName}</div>
+                    <div className="active-repository-meta">
+                      <span>{repoSource || "Imported project"}</span>
+                      <span>{repoFiles.length} files</span>
+                    </div>
+                    <details className="repository-file-browser">
+                      <summary>Browse project files</summary>
+                      <div className="repository-file-list">
+                        {repoFiles.length ? repoFiles.slice(0, 250).map((file) => (
+                          <div className="repository-file-item" key={file} title={file}>
+                            <span aria-hidden="true">{file.includes("/") ? "▱" : "▤"}</span>
+                            <span>{file}</span>
+                          </div>
+                        )) : <p className="sidebar-help">No files found in this repository.</p>}
+                        {repoFiles.length > 250 && <p className="sidebar-help">Showing the first 250 of {repoFiles.length} files.</p>}
+                      </div>
+                    </details>
+                  </>
+                ) : (
+                  <p className="repository-empty">No repository selected. Import a GitHub repository, ZIP, or folder to get started.</p>
+                )}
+              </section>
             </>
           )}
         </div>
@@ -1407,14 +1543,13 @@ function toggleVoiceInput() {
                 type="button"
                 className="send-button"
                 onClick={() => {
-                  if (scanLoading || engineeringLoading || reviewLoading || fixLoading) return;
+                  if (scanLoading || engineeringLoading || fixLoading) return;
                   const next = !scanOpen;
                   setScanOpen(next);
+                  setCodeEditorOpen(false);
                   setEngineeringOpen(false);
-                  setReviewOpen(false);
                   setScanError("");
                   setEngineeringError("");
-                  setReviewError("");
                 }}
               >
                 {scanOpen ? "Close Repository Scan" : "Scan Repository"}
@@ -1427,12 +1562,11 @@ function toggleVoiceInput() {
                 className="send-button"
                 aria-expanded={codeEditorOpen}
                 onClick={() => {
-                  if (scanLoading || engineeringLoading || reviewLoading || fixLoading) return;
+                  if (scanLoading || engineeringLoading || fixLoading) return;
                   const next = !codeEditorOpen;
                   setCodeEditorOpen(next);
                   setEngineeringOpen(false);
                   setScanOpen(false);
-                  setReviewOpen(false);
                   setFixError("");
                   setFixMessage("");
                 }}
@@ -1447,39 +1581,19 @@ function toggleVoiceInput() {
                 className="send-button"
                 aria-expanded={engineeringOpen}
                 onClick={() => {
-                  if (scanLoading || engineeringLoading || reviewLoading || fixLoading) return;
+                  if (scanLoading || engineeringLoading || fixLoading) return;
                   const next = !engineeringOpen;
                   setEngineeringOpen(next);
                   setCodeEditorOpen(false);
                   setScanOpen(false);
-                  setReviewOpen(false);
                   setEngineeringError("");
                   setScanError("");
-                  setReviewError("");
                 }}
               >
                 {engineeringOpen ? "Close Run Tests" : "Run Tests"}
               </button>
             )}
 
-            {mode === "agent" && (
-              <button
-                type="button"
-                className="send-button"
-                onClick={() => {
-                  if (scanLoading || engineeringLoading || reviewLoading || fixLoading) return;
-                  const next = !reviewOpen;
-                  setReviewOpen(next);
-                  setScanOpen(false);
-                  setEngineeringOpen(false);
-                  setReviewError("");
-                  setScanError("");
-                  setEngineeringError("");
-                }}
-              >
-                {reviewOpen ? "Close Code Review" : "Code Review"}
-              </button>
-            )}
           </div>
         </header>
 
@@ -1493,14 +1607,22 @@ function toggleVoiceInput() {
 
             <section className="engineering-tool-card code-edit-card" aria-label="AI Code Editing">
               <form onSubmit={requestManualCodeEdit} className="code-editor-form">
-                <input
-                  aria-label="Repository-relative source file path"
+                <select
+                  aria-label="Choose source file to edit"
                   value={editFilePath}
                   onChange={(event) => setEditFilePath(event.target.value)}
-                  placeholder="Repository-relative file path, e.g. backend/app/main.py"
-                  disabled={fixLoading}
+                  disabled={fixLoading || !editableRepositoryFiles.length}
                   className="code-editor-file-input"
-                />
+                >
+                  <option value="">
+                    {editableRepositoryFiles.length
+                      ? "Choose a source file from the imported repository"
+                      : "Import a repository containing .py, .js, .jsx, .ts or .tsx files"}
+                  </option>
+                  {editableRepositoryFiles.map((file) => (
+                    <option value={file} key={file}>{file}</option>
+                  ))}
+                </select>
 
                 <div className="code-editor-composer">
                   <div className="glow-wrapper">
@@ -1943,85 +2065,8 @@ function toggleVoiceInput() {
           </section>
         )}
 
-        {reviewOpen && (
-          <section
-            aria-label="Code review"
-            style={{
-              margin: "16px 24px 0",
-              padding: "18px",
-              border: "1px solid var(--border, #303642)",
-              borderRadius: "12px",
-              background: "var(--panel, #11151d)",
-            }}
-          >
-            <h3 style={{ marginTop: 0, marginBottom: "8px" }}>
-              AI Code Review
-            </h3>
-
-            <p style={{ marginTop: 0, opacity: 0.8 }}>
-              Enter a file path relative to the repository folder. The file
-              is reviewed without being modified.
-            </p>
-
-            <form
-              onSubmit={runCodeReview}
-              style={{
-                display: "flex",
-                gap: "10px",
-                alignItems: "center",
-                flexWrap: "wrap",
-              }}
-            >
-              <input
-                aria-label="File path to review"
-                value={reviewFilePath}
-                onChange={(event) => setReviewFilePath(event.target.value)}
-                placeholder="backend/app/rag.py"
-                disabled={reviewLoading}
-                style={{
-                  flex: "1 1 280px",
-                  minWidth: 0,
-                  padding: "11px 12px",
-                  borderRadius: "8px",
-                  border: "1px solid var(--border, #303642)",
-                  background: "var(--input, #090b10)",
-                  color: "inherit",
-                }}
-              />
-
-              <button
-                type="submit"
-                className="send-button"
-                disabled={reviewLoading || !reviewFilePath.trim()}
-              >
-                {reviewLoading ? "Reviewing..." : "Review File"}
-              </button>
-            </form>
-
-            {reviewError && <ErrorAlert title="Review failed" message={reviewError} onClose={() => setReviewError("")} style={{ marginTop: "12px" }} />}
-
-            {reviewLoading && (
-              <p role="status" style={{ marginBottom: 0 }}>
-                ARGUS is reviewing the file with Gemini...
-              </p>
-            )}
-
-            {reviewResult && (
-              <div
-                style={{
-                  marginTop: "16px",
-                  width: "100%",
-                  minWidth: 0,
-                }}
-              >
-                <MarkdownContent content={reviewResult} />
-              </div>
-            )}
-          </section>
-        )}
-
         <section className="conversation">
-          {messages.length === 0 && !input.trim() && !scanOpen && !reviewOpen && !scanResult && !reviewResult && !scanLoading && !reviewLoading ? (
+          {messages.length === 0 && !input.trim() && !scanOpen && !scanResult && !scanLoading ? (
             <div className="welcome welcome-minimal" aria-live="polite">
               {isGuest ? (
                 <h2>Hi, welcome to ARGUS.</h2>
@@ -2081,7 +2126,7 @@ function toggleVoiceInput() {
         </section>
         </div>
 
-        {!(mode === "agent" && (engineeringOpen || codeEditorOpen || scanOpen || reviewOpen)) && <footer className="composer-area">
+        {!(mode === "agent" && (engineeringOpen || codeEditorOpen || scanOpen)) && <footer className="composer-area">
           <form className="composer" onSubmit={sendMessage}>
             <div className="glow-wrapper">
               <div className="input-box">

@@ -21,9 +21,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -77,7 +78,7 @@ REVIEW_IGNORED_DIRS = {
 }
 
 MAX_REVIEW_FILE_BYTES = 2_000_000
-MAX_SCAN_AI_FILE_BYTES = 100_000
+MAX_SCAN_AI_FILE_BYTES = MAX_REVIEW_FILE_BYTES
 MAX_CHUNK_CHARS = 6000
 
 
@@ -116,9 +117,6 @@ class AgentRequest(BaseModel):
     question: str = Field(min_length=1, max_length=30000)
 
 
-class ReviewRequest(BaseModel):
-    repo_path: str = Field(min_length=1, max_length=1000)
-    file_path: str = Field(min_length=1, max_length=1000)
 
 
 class RepositoryScanRequest(BaseModel):
@@ -828,6 +826,197 @@ async def chat(request: ChatRequest):
         num_predict=2048,
     )
     return ChatResponse(reply=answer, model=model_name)
+
+
+
+
+# ============================================================
+# Cloud repository import (GitHub URL, ZIP, or folder upload)
+# ============================================================
+
+REPOSITORY_WORKSPACE_ROOT = Path(os.getenv("ARGUS_REPOSITORY_WORKSPACE", "/tmp/argus-workspaces"))
+MAX_REPOSITORY_UPLOAD_BYTES = 100 * 1024 * 1024
+MAX_REPOSITORY_UPLOAD_FILES = 5000
+MAX_REPOSITORY_FILE_BYTES = 25 * 1024 * 1024
+
+
+def _new_repository_workspace() -> Path:
+    REPOSITORY_WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    return REPOSITORY_WORKSPACE_ROOT / uuid4().hex
+
+
+def _safe_relative_upload_path(raw_path: str) -> Path:
+    normalized = raw_path.replace("\\", "/").strip()
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[a-zA-Z]:", normalized)
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+    ):
+        raise HTTPException(status_code=400, detail="Upload contains an unsafe file path.")
+    return Path(*normalized.split("/"))
+
+
+def _extract_repository_zip(zip_path: Path, destination: Path) -> None:
+    import zipfile
+
+    total_uncompressed = 0
+    file_count = 0
+    destination_resolved = destination.resolve()
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            for info in archive.infolist():
+                if info.is_dir():
+                    continue
+                relative = _safe_relative_upload_path(info.filename)
+                file_count += 1
+                total_uncompressed += info.file_size
+                if file_count > MAX_REPOSITORY_UPLOAD_FILES:
+                    raise HTTPException(status_code=413, detail="ZIP contains too many files.")
+                if total_uncompressed > MAX_REPOSITORY_UPLOAD_BYTES * 5:
+                    raise HTTPException(status_code=413, detail="ZIP expands beyond the 500 MB extraction limit.")
+                if info.file_size > MAX_REPOSITORY_FILE_BYTES:
+                    continue
+                target = (destination / relative).resolve()
+                if not target.is_relative_to(destination_resolved):
+                    raise HTTPException(status_code=400, detail="ZIP contains an unsafe file path.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=400, detail="The uploaded file is not a valid ZIP archive.") from exc
+
+
+@app.post("/api/repository/import/github")
+def import_github_repository(
+    repository_url: str = Form(..., min_length=10, max_length=500),
+    github_token: str = Form(default="", max_length=500),
+):
+    parsed = urlparse(repository_url.strip())
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"github.com", "www.github.com"}
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise HTTPException(status_code=400, detail="Enter a valid HTTPS GitHub repository URL.")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) != 2 or any(part in {".", ".."} for part in parts):
+        raise HTTPException(status_code=400, detail="Use a repository URL like https://github.com/owner/repository.")
+    clone_url = f"https://github.com/{parts[0]}/{parts[1].removesuffix('.git')}.git"
+    # git clone requires the destination path not to exist (or be empty).
+    # _new_repository_workspace creates only the parent directory.
+    workspace = _new_repository_workspace()
+    command = ["git", "clone", "--depth", "1", "--", clone_url, str(workspace)]
+    git_env = os.environ.copy()
+    if github_token.strip():
+        token_header = base64.b64encode(f"x-access-token:{github_token.strip()}".encode()).decode()
+        git_env["GIT_CONFIG_COUNT"] = "1"
+        git_env["GIT_CONFIG_KEY_0"] = "http.https://github.com/.extraheader"
+        git_env["GIT_CONFIG_VALUE_0"] = f"AUTHORIZATION: basic {token_header}"
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120, check=False, env=git_env)
+        if result.returncode != 0:
+            shutil.rmtree(workspace, ignore_errors=True)
+            message = "Unable to clone this repository. Check the URL and repository access."
+            logger.warning("GitHub clone failed: %s", result.stderr[-1000:])
+            raise HTTPException(status_code=400, detail=message)
+        shutil.rmtree(workspace / ".git", ignore_errors=True)
+        return {"repo_path": str(workspace), "repository": f"{parts[0]}/{parts[1].removesuffix('.git')}", "source": "github"}
+    except subprocess.TimeoutExpired as exc:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise HTTPException(status_code=408, detail="Repository cloning timed out. Try a smaller repository.") from exc
+    except HTTPException:
+        raise
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        logger.exception("GitHub repository import failed")
+        raise HTTPException(status_code=500, detail="Repository import failed.")
+
+
+@app.post("/api/repository/import/upload")
+async def import_uploaded_repository(
+    files: list[UploadFile] = File(...),  # noqa: B008
+    relative_paths: list[str] = Form(...), # noqa: B008
+):
+    if not files or len(files) != len(relative_paths):
+        raise HTTPException(status_code=400, detail="Upload files and relative paths do not match.")
+    if len(files) > MAX_REPOSITORY_UPLOAD_FILES:
+        raise HTTPException(status_code=413, detail="Upload contains too many files.")
+
+    workspace = _new_repository_workspace()
+    workspace.mkdir(parents=True, exist_ok=False)
+    total_bytes = 0
+    try:
+        # A single ZIP is safely extracted; multiple files preserve folder structure.
+        if len(files) == 1 and files[0].filename and files[0].filename.lower().endswith(".zip"):
+            zip_path = workspace / "repository-upload.zip"
+            content = await files[0].read(MAX_REPOSITORY_UPLOAD_BYTES + 1)
+            if len(content) > MAX_REPOSITORY_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="ZIP upload exceeds the 100 MB limit.")
+            zip_path.write_bytes(content)
+            await files[0].close()
+            _extract_repository_zip(zip_path, workspace)
+            zip_path.unlink(missing_ok=True)
+        else:
+            for upload, raw_path in zip(files, relative_paths):
+                relative = _safe_relative_upload_path(raw_path)
+                if relative.name.lower() in {".env", ".env.local", ".env.production"}:
+                    continue
+                target = (workspace / relative).resolve()
+                if not target.is_relative_to(workspace.resolve()):
+                    raise HTTPException(status_code=400, detail="Upload contains an unsafe file path.")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                file_bytes = 0
+                with target.open("wb") as output:
+                    while chunk := await upload.read(1024 * 1024):
+                        file_bytes += len(chunk)
+                        total_bytes += len(chunk)
+                        if file_bytes > MAX_REPOSITORY_FILE_BYTES:
+                            raise HTTPException(status_code=413, detail="A folder file exceeds the 25 MB per-file limit.")
+                        if total_bytes > MAX_REPOSITORY_UPLOAD_BYTES:
+                            raise HTTPException(status_code=413, detail="Folder upload exceeds the 100 MB total limit.")
+                        output.write(chunk)
+                await upload.close()
+        if not any(path.is_file() for path in workspace.rglob("*")):
+            raise HTTPException(status_code=400, detail="The uploaded repository contains no files.")
+        return {"repo_path": str(workspace), "repository": workspace.name, "source": "upload"}
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+
+
+@app.get("/api/repository/files")
+def list_imported_repository_files(repo_path: str):
+    """List files only from ARGUS-managed imported workspaces."""
+    try:
+        root = Path(repo_path).resolve()
+        workspace_root = REPOSITORY_WORKSPACE_ROOT.resolve()
+        if not root.is_dir() or not root.is_relative_to(workspace_root):
+            raise HTTPException(status_code=400, detail="Select a valid imported repository first.")
+
+        ignored = {".git", ".venv", "venv", "node_modules", "dist", "build", "__pycache__", ".chroma"}
+        files = []
+        for path in root.rglob("*"):
+            if not path.is_file():
+                continue
+            relative = path.relative_to(root)
+            if any(part in ignored for part in relative.parts):
+                continue
+            if path.name.lower() in {".env", ".env.local", ".env.production"}:
+                continue
+            files.append(relative.as_posix())
+            if len(files) >= 5000:
+                break
+
+        files.sort(key=lambda value: (value.count("/"), value.lower()))
+        return {"repository": root.name, "file_count": len(files), "files": files}
+    except HTTPException:
+        raise
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail="Unable to read the imported repository.") from exc
 
 
 # ============================================================
@@ -3242,50 +3431,6 @@ def reject_repository_fix(request: RejectFixRequest, http_request: Request):
 
 
 # ============================================================
-# Single-file review
-# ============================================================
-
-
-@app.post("/api/repository/review")
-async def review_repository_file(request: ReviewRequest):
-    _, target = resolve_repository_file(
-        request.repo_path,
-        request.file_path,
-    )
-    relative = target.relative_to(Path(request.repo_path).resolve())
-    code = read_source(target)
-
-    if not code.strip():
-        return {
-            "file": relative.as_posix(),
-            "review": "The file is empty. There is no code to review.",
-            "model": GEMINI_MODEL,
-        }
-
-    static_analysis = run_ruff_review(target)
-    language_validation = run_language_validation(target, code)
-
-    review, model_name, chunked = await review_source_with_ai(
-        relative_path=relative.as_posix(),
-        code=code,
-        static_analysis=static_analysis,
-        language_validation=language_validation,
-    )
-
-    return {
-        "file": relative.as_posix(),
-        "static_analysis": static_analysis,
-        "language_validation": language_validation,
-        "review": review,
-        "source_truncated": False,
-        "reviewed_in_chunks": chunked,
-        "review_completeness": "chunked" if chunked else "single_section",
-        "model": model_name,
-        "read_only": True,
-    }
-
-
-# ============================================================
 # Repository-wide bug detection
 # ============================================================
 
@@ -3304,6 +3449,7 @@ async def scan_repository(request: RepositoryScanRequest):
 
     candidates: list[tuple[Path, Path]] = []
     skipped_large = 0
+    skipped_large_files: list[dict[str, Any]] = []
     traversal_errors = 0
 
     for current_dir, directories, filenames in os.walk(
@@ -3333,8 +3479,15 @@ async def scan_repository(request: RepositoryScanRequest):
 
                 if not target.is_file():
                     continue
-                if target.stat().st_size > MAX_SCAN_AI_FILE_BYTES:
+                file_size = target.stat().st_size
+                if file_size > MAX_SCAN_AI_FILE_BYTES:
                     skipped_large += 1
+                    skipped_large_files.append({
+                        "file": relative.as_posix(),
+                        "size_bytes": file_size,
+                        "limit_bytes": MAX_SCAN_AI_FILE_BYTES,
+                        "reason": "File exceeds the 2 MB AI review limit.",
+                    })
                     continue
 
             except (OSError, ValueError):
@@ -3487,6 +3640,7 @@ async def scan_repository(request: RepositoryScanRequest):
         "files_failed": failed_files,
         "files_skipped": skipped_files,
         "files_skipped_large": skipped_large,
+        "skipped_large_files": skipped_large_files,
         "static_findings_count": static_findings_count,
         "typescript_findings_count": typescript_validation.get("count", 0),
         "finding_summary": {
@@ -3503,6 +3657,7 @@ async def scan_repository(request: RepositoryScanRequest):
         "files_considered": len(candidates),
         "files_failed": failed_files,
         "files_skipped_large": skipped_large,
+        "skipped_large_files": skipped_large_files,
         "max_files": request.max_files,
         "static_findings_count": static_findings_count,
         "typescript_validation": typescript_validation,

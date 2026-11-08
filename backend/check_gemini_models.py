@@ -1,6 +1,7 @@
 
 import os
 from pathlib import Path
+
 from dotenv import load_dotenv
 from google import genai
 
@@ -25,7 +26,7 @@ try:
             print("Supported actions:", actions)
             print("-" * 50)
 
-except Exception as exc:
+except Exception as exc: # noqa: BLE001
     print("Model listing failed:")
     print(type(exc).__name__, str(exc))
 
