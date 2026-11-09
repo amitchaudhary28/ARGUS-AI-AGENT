@@ -2912,9 +2912,12 @@ def remove_expired_fix_suggestions() -> None:
 
 def validate_proposed_fix(target: Path, proposed_code: str) -> dict:
     """
-    Fail-closed syntax validation for supported editable source files.
-    Python uses AST; JavaScript/TypeScript use the repository's TypeScript
-    compiler when installed. No file is applied when validation is unavailable.
+    Validate proposed source changes when a suitable validator is available.
+
+    Python uses AST validation. JavaScript/TypeScript use the repository's
+    TypeScript compiler when installed. If Node.js or the repository compiler
+    is unavailable, validation is explicitly marked as skipped (not passed),
+    but the user can still review and approve the proposed diff.
     """
     suffix = target.suffix.lower()
 
@@ -2953,14 +2956,21 @@ def validate_proposed_fix(target: Path, proposed_code: str) -> dict:
 
     compiler = root / "node_modules" / "typescript" / "bin" / "tsc"
     node = shutil.which("node")
-    if not compiler.is_file() or not node:
+    if not node or not compiler.is_file():
+        missing = []
+        if not node:
+            missing.append("Node.js")
+        if not compiler.is_file():
+            missing.append("the repository's TypeScript compiler")
         return {
-            "status": "unavailable",
-            "valid": False,
+            "status": "skipped",
+            "valid": None,
             "message": (
-                "JavaScript/TypeScript validation requires Node.js and the "
-                "repository's installed TypeScript compiler. Install the "
-                "project dependencies before requesting an automatic edit."
+                "Compiler validation was skipped because "
+                + " and ".join(missing)
+                + " is not available in the backend/repository environment. "
+                "You can still review the proposed diff and approve or reject "
+                "the change. The code has NOT been compiler-validated."
             ),
         }
 
@@ -3016,13 +3026,21 @@ def validate_proposed_fix(target: Path, proposed_code: str) -> dict:
         }
     except OSError as exc:
         return {
-            "status": "unavailable",
-            "valid": False,
-            "message": f"Unable to run TypeScript validation: {exc}",
+            "status": "skipped",
+            "valid": None,
+            "message": (
+                "Compiler validation could not be started in this backend "
+                f"environment ({exc}). The proposed diff is still available "
+                "for review, but the code has NOT been compiler-validated."
+            ),
         }
     finally:
         temporary.unlink(missing_ok=True)
 
+
+def validation_blocks_edit(validation: dict) -> bool:
+    """Block known-invalid or timed-out validation, but allow an explicit skip."""
+    return validation.get("status") in {"failed", "timeout", "unsupported"}
 
 
 async def generate_ai_fix(
@@ -3233,7 +3251,7 @@ async def suggest_repository_fix(request: SuggestFixRequest, http_request: Reque
 
     validation = validate_proposed_fix(target, proposed_code)
 
-    if not validation["valid"]:
+    if validation_blocks_edit(validation):
         raise HTTPException(
             status_code=422,
             detail=validation["message"],
@@ -3278,6 +3296,11 @@ async def suggest_repository_fix(request: SuggestFixRequest, http_request: Reque
         "original_code": original_code,
         "proposed_code": proposed_code,
         "validation": validation,
+        "validation_note": (
+            "Compiler validation was skipped; review the diff carefully before approval."
+            if validation.get("status") == "skipped"
+            else validation.get("message")
+        ),
         "model": model_name,
         "requires_approval": True,
         "applied": False,
@@ -3328,7 +3351,7 @@ def apply_repository_fix(request: ApplyFixRequest, http_request: Request):
 
         validation = validate_proposed_fix(target, proposed_code)
 
-        if not validation["valid"]:
+        if validation_blocks_edit(validation):
             raise HTTPException(
                 status_code=422,
                 detail=validation["message"],
@@ -3351,7 +3374,7 @@ def apply_repository_fix(request: ApplyFixRequest, http_request: Request):
                 applied_code,
             )
 
-            if not applied_validation["valid"] or applied_code != proposed_code:
+            if validation_blocks_edit(applied_validation) or applied_code != proposed_code:
                 raise ValueError(
                     applied_validation.get(
                         "message",
