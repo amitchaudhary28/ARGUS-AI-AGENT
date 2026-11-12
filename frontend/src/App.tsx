@@ -1429,19 +1429,23 @@ function toggleVoiceInput() {
               <label htmlFor="repo-url" className="field-label">GITHUB REPOSITORY URL</label>
               <input
                 id="repo-url"
+                name="githubRepoUrl"
+                type="url"
                 className="field"
                 value={repoImportUrl}
                 onChange={(event) => setRepoImportUrl(event.target.value)}
                 placeholder="https://github.com/owner/repository"
+                autoComplete="off"
                 disabled={repoImportBusy}
               />
               <input
+                name="githubPrivateToken"
                 className="field"
                 type="password"
                 value={repoImportToken}
                 onChange={(event) => setRepoImportToken(event.target.value)}
                 placeholder="Private repo token (optional)"
-                autoComplete="off"
+                autoComplete="new-password"
                 disabled={repoImportBusy}
               />
               <button type="button" className="repo-import-button" disabled={repoImportBusy || !repoImportUrl.trim()} onClick={() => void importRepository("github")}>
