@@ -514,33 +514,49 @@ ARGUS_ALLOW_GUEST_ACCESS = os.getenv(
 ).strip().lower() in {"1", "true", "yes", "on"}
 
 
+
 @app.middleware("http")
 async def require_account_for_private_api(request: Request, call_next):
     path = request.url.path
+
     auth_paths = {
         "/api/auth/register",
         "/api/auth/login",
         "/api/auth/me",
         "/api/auth/logout",
     }
+
     account_paths = {"/api/account/conversations"}
+
     if (
         request.method != "OPTIONS"
         and path.startswith("/api/")
         and path not in auth_paths
         and path != "/api/health"
     ):
-        user = get_user_for_token(request.cookies.get(SESSION_COOKIE))
+        user = get_user_for_token(
+            request.cookies.get(SESSION_COOKIE)
+        )
+
         if user is not None:
             request.state.argus_user = public_user(user)
+
         elif path in account_paths or not ARGUS_ALLOW_GUEST_ACCESS:
             return Response(
                 content='{"detail":"Authentication required."}',
                 status_code=401,
                 media_type="application/json",
             )
-    return await call_next(request)
 
+        else:
+            # Provide a consistent identity for guest operations.
+            request.state.argus_user = {
+                "id": "guest",
+                "name": "Guest",
+                "email": None,
+            }
+
+    return await call_next(request)
 
 # Keep CORS outermost so CORS headers are also added to auth middleware 401s.
 _default_cors_origins = [
